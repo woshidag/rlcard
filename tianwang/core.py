@@ -469,7 +469,7 @@ def _play_class(combo: Combo, ts: str) -> int:
         return 5 if all(r >= 10 for r in ranks) else 4      # 主对 / 副对
     # kind==2 两张不等
     if all(r >= 10 for r in ranks):                         # 双主毙(两层)
-        return 3
+        return 6
     if any(r >= 10 for r in ranks):                         # 单主毙+带牌(一层)
         return 2
     return -1                                               # 垫两单 => 必输
@@ -478,15 +478,19 @@ def _play_class(combo: Combo, ts: str) -> int:
 def beats(a: Combo, b: Combo, ts: str) -> bool:
     """a 能否压过当前最强牌 b。"""
     ca, cb = _play_class(a, ts), _play_class(b, ts)
+    # —— 强制规则："两张单牌"类跟牌(纯垫 / 一主+带牌)永远输给对子；
+    #    "双主毙"(两张不同主牌)属于两层毙牌，可以赢副牌对子。——
+    if a.kind == 2 and b.kind == 1 and ca in (2, -1):
+        return False
+    if a.kind == 1 and b.kind == 2 and cb in (2, -1):
+        return True                          # 对子必胜两单/一主带牌
     if ca != cb:
-        if cb == 4 and ca == 2:
-            return True                    # 特例：对子必胜"一主+带牌"的无奈跟牌
-        return ca > cb                     # 类别序: 垫(-1)<副单<主单<双毙<副对<主对
+        return ca > cb                       # 类别序: 垫(-1)<副单<一主毙<副对<双毙/主对
     ra = sorted((trump_rank(c, ts) for c in a.cards), reverse=True)
     rb = sorted((trump_rank(c, ts) for c in b.cards), reverse=True)
-    if len(ra) != len(rb):                 # 同为单张类
+    if len(ra) != len(rb):                   # 同为单张类
         return ra[0] > rb[0]
-    return ra > rb                         # 同类逐位字典序比较
+    return ra > rb                           # 同类逐位字典序比较
 
 
 def trick_winner(trick: TrickState, ts: str) -> int:
