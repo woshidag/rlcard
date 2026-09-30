@@ -84,6 +84,11 @@ class Card:
         return (self.suit, self.rank)
 
     @property
+    def face(self) -> Tuple[str, str]:
+        """key 的别名(RLCard 侧习惯叫法)。"""
+        return (self.suit, self.rank)
+
+    @property
     def is_joker(self) -> bool:
         return self.rank in JOKERS
 
@@ -330,30 +335,44 @@ class TrickState:
 
 
 class TianwangState:
-    """原型状态：四家手牌 + 主花色 + 当前墩(None 表示轮到领出)。"""
+    """原型状态：四家手牌 + 主花色 + 当前墩 + 行动者座位。
+
+    Args:
+        hands: 四家手牌
+        trump_suit: 本局主花色
+        trick: 当前墩; None 表示轮到某家领出
+        actor: 当前行动玩家的座位号。当 trick is None(领出)时，
+               **必须**由调用方(Round/Game)显式指定 —— 修复早期版本
+               硬编码 P0 领出的 Bug；缺省 0 仅为兼容旧 demo 调用。
+    """
     def __init__(self, hands: List[List[Card]], trump_suit: str,
-                 trick: Optional[TrickState] = None):
+                 trick: Optional[TrickState] = None,
+                 actor: int = 0):
         self.hands = hands
         self.trump_suit = trump_suit
         self.trick = trick
+        self.actor = actor % NUM_PLAYERS
 
 
 # ================================================================
 # 9. 第二步核心：get_legal_actions(state)
 # ================================================================
-def get_legal_actions(state: TianwangState) -> List[int]:
+def get_legal_actions(state: TianwangState,
+                      player_id: Optional[int] = None) -> List[int]:
     """
     返回当前行动玩家的合法动作 ID 列表（已排序去重）。
-      - 领出：所有单张 + 所有对子（无甩牌）；
+      - 领出：所有单张 + 所有对子（无甩牌）；行动者由 state.actor
+        (或显式参数 player_id)指定 —— 不再硬编码 P0；
       - 跟单张：见 _follow_single；
       - 跟对子：见 _follow_pair —— 严格要求"无该花色对子时，
         把该花色的任意两张单牌组合加入合法动作"。
     """
     trick = state.trick
     if trick is None:
-        pid = 0                     # 原型约定：开局由 P0 领出
+        pid = state.actor if player_id is None else player_id % NUM_PLAYERS
         return _lead_actions(state.hands[pid])
-    pid = trick.current_player()
+    pid = trick.current_player() if player_id is None \
+        else player_id % NUM_PLAYERS
     hand = state.hands[pid]
     ts = state.trump_suit
     lead = trick.lead_combo
@@ -460,39 +479,61 @@ def _two_combos(cards: List[Card]) -> List[Tuple[Card, Card]]:
 # 10. 墩结算辅助（第三步会用到，先给出正确实现）
 #     规则：主杀副；两张单牌永输对子；垫牌必输；同级互等保持先出者
 # ================================================================
+# ---- 一手牌的比较类别常量（数值越大越强）。统一在此定义，避免魔法数字 ----
+CLASS_DISCARD_PAIR   = -1   # 垫两单（两张均非主）      => 必输
+CLASS_SIDE_SINGLE    = 0    # 副牌单张
+CLASS_TRUMP_SINGLE   = 1    # 主牌单张（毙/吊）
+CLASS_ONE_TRUMP_KICK = 2    # 一主 + 一张带牌（两张不等）
+CLASS_SIDE_PAIR      = 3    # 副牌对子
+CLASS_TRUMP_PAIR     = 4    # 主牌对子
+CLASS_DOUBLE_RUFF    = 5    # 两张不同主牌（双主毙）
+
+
 def _play_class(combo: Combo, ts: str) -> int:
-    """把一手牌归入比较类别(数值越大越强)。"""
+    """把一手牌归入比较类别(数值越大越强)，取值见上方 CLASS_* 常量。"""
     if combo.kind == 0:
-        return 1 if is_trump(combo.cards[0], ts) else 0     # 副单 / 主单(毙)
+        return CLASS_TRUMP_SINGLE if is_trump(combo.cards[0], ts) else CLASS_SIDE_SINGLE
     ranks = [trump_rank(c, ts) for c in combo.cards]
     if combo.kind == 1:                                     # 真对子
-        return 5 if all(r >= 10 for r in ranks) else 4      # 主对 / 副对
+        return CLASS_TRUMP_PAIR if all(r >= 10 for r in ranks) else CLASS_SIDE_PAIR
     # kind==2 两张不等
-    if all(r >= 10 for r in ranks):                         # 双主毙(两层)
-        return 6
-    if any(r >= 10 for r in ranks):                         # 单主毙+带牌(一层)
-        return 2
-    return -1                                               # 垫两单 => 必输
+    if all(is_trump(c, ts) for c in combo.cards):           # 双主毙
+        return CLASS_DOUBLE_RUFF
+    if any(is_trump(c, ts) for c in combo.cards):           # 一主+带牌
+        return CLASS_ONE_TRUMP_KICK
+    return CLASS_DISCARD_PAIR                               # 垫两单 => 必输
+
+
+_TWO_CARD_NON_PAIR_CLASSES = (CLASS_ONE_TRUMP_KICK, CLASS_DISCARD_PAIR)
 
 
 def beats(a: Combo, b: Combo, ts: str) -> bool:
-    """a 能否压过当前最强牌 b。"""
+    """a 能否压过当前最强牌 b。
+
+    类别序(_play_class 返回值，数值越大越强，与代码实现严格一致):
+        垫两单(CLASS_DISCARD_PAIR=-1) < 副单(0) < 主单毙(1)
+        < 一主带牌(CLASS_ONE_TRUMP_KICK=2) < 副对(3)
+        < 主对(4) < 双主毙(CLASS_DOUBLE_RUFF=5)
+
+    说明："一主+带牌"只算一层毙牌，它强于任何纯副牌单张、也强于纯垫，
+    但弱于对子层——由下方强制规则保证：跟牌的两单组合(纯垫/一主带牌)
+    永远输给对子，对子必胜纯垫两单；跨层比较时高类别必胜低类别。
+    """
     ca, cb = _play_class(a, ts), _play_class(b, ts)
     ra = sorted((trump_rank(c, ts) for c in a.cards), reverse=True)
     rb = sorted((trump_rank(c, ts) for c in b.cards), reverse=True)
-    # —— 强制规则："两张单牌"类跟牌(纯垫 / 一主+带牌)永远输给对子；——
-    if a.kind == 2 and b.kind == 1 and ca in (2, -1):
+    # —— 强制规则：两单组合(纯垫/一主带牌)永远输给对子 ——
+    if a.kind == 2 and b.kind == 1 and ca in _TWO_CARD_NON_PAIR_CLASSES:
         return False
-    if a.kind == 1 and b.kind == 2 and cb in (2, -1):
-        return True                          # 对子必胜两单/一主带牌
+    if a.kind == 1 and b.kind == 2 and cb in _TWO_CARD_NON_PAIR_CLASSES:
+        return True                          # 对子必胜纯垫两单/一主带牌
     # —— 同类比牌力；跨类比类别，但主牌对子与双主毙之间按最大牌逐位比较
     #    (天王/大王级的主对可以大过由普通主7组成的双毙)。——
-    if ca == cb or {ca, cb} == {5, 6}:
+    if ca == cb or {ca, cb} == {CLASS_TRUMP_PAIR, CLASS_DOUBLE_RUFF}:
         if len(ra) != len(rb):
             return ra[0] > rb[0]
         return ra > rb
-    return ca > cb                           # 其余按类别序:
-    # 垫(-1) < 副单(0) < 主单毙(1) < 一主带牌(2) < 副对(4) < 主对(5)/双毙(6)
+    return ca > cb
 
 
 def trick_winner(trick: TrickState, ts: str) -> int:

@@ -44,6 +44,10 @@ class TianwangGame:
         self.players = [Player(num, self.np_random)
                         for num in range(self.num_players)]
 
+        # initialize players (RLCard 约定: game 对象复用, 每局必须重置全部动态状态)
+        for player in self.players:
+            player.reset_game_state()
+
         # initialize round: shuffle & deal (14*4 + 12 kitty), trump, bury
         self.round = Round(self.np_random)
         self.round.dealer.deal_cards(self.players)
