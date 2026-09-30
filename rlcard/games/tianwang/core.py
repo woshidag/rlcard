@@ -478,19 +478,21 @@ def _play_class(combo: Combo, ts: str) -> int:
 def beats(a: Combo, b: Combo, ts: str) -> bool:
     """a 能否压过当前最强牌 b。"""
     ca, cb = _play_class(a, ts), _play_class(b, ts)
-    # —— 强制规则："两张单牌"类跟牌(纯垫 / 一主+带牌)永远输给对子；
-    #    "双主毙"(两张不同主牌)属于两层毙牌，可以赢副牌对子。——
+    ra = sorted((trump_rank(c, ts) for c in a.cards), reverse=True)
+    rb = sorted((trump_rank(c, ts) for c in b.cards), reverse=True)
+    # —— 强制规则："两张单牌"类跟牌(纯垫 / 一主+带牌)永远输给对子；——
     if a.kind == 2 and b.kind == 1 and ca in (2, -1):
         return False
     if a.kind == 1 and b.kind == 2 and cb in (2, -1):
         return True                          # 对子必胜两单/一主带牌
-    if ca != cb:
-        return ca > cb                       # 类别序: 垫(-1)<副单<一主毙<副对<双毙/主对
-    ra = sorted((trump_rank(c, ts) for c in a.cards), reverse=True)
-    rb = sorted((trump_rank(c, ts) for c in b.cards), reverse=True)
-    if len(ra) != len(rb):                   # 同为单张类
-        return ra[0] > rb[0]
-    return ra > rb                           # 同类逐位字典序比较
+    # —— 同类比牌力；跨类比类别，但主牌对子与双主毙之间按最大牌逐位比较
+    #    (天王/大王级的主对可以大过由普通主7组成的双毙)。——
+    if ca == cb or {ca, cb} == {5, 6}:
+        if len(ra) != len(rb):
+            return ra[0] > rb[0]
+        return ra > rb
+    return ca > cb                           # 其余按类别序:
+    # 垫(-1) < 副单(0) < 主单毙(1) < 一主带牌(2) < 副对(4) < 主对(5)/双毙(6)
 
 
 def trick_winner(trick: TrickState, ts: str) -> int:
@@ -499,6 +501,44 @@ def trick_winner(trick: TrickState, ts: str) -> int:
         if beats(combo, best_combo, ts):
             best_pid, best_combo = pid, combo
     return best_pid
+
+
+# ================================================================
+# 附加工具：牌面排序(供 Dealer 整理手牌) / 定主辅助
+# ================================================================
+def tianwang_sort_card(c1: 'Card', c2: 'Card') -> int:
+    """比较函数：先按花色分组(主牌意识由 trump_rank 另行处理)，
+    组内按 rank 顺序，王牌排最后。用于手牌展示与稳定编码。"""
+    suit_order = {s: i for i, s in enumerate(SUITS)}
+    k1, k2 = c1.key, c2.key
+    s1 = suit_order.get(k1[0], 9)
+    s2 = suit_order.get(k2[0], 9)
+    if s1 != s2:
+        return -1 if s1 < s2 else 1
+    r1 = RANKS.index(k1[1]) if k1[1] in RANKS else 99
+    r2 = RANKS.index(k2[1]) if k2[1] in RANKS else 99
+    if r1 != r2:
+        return -1 if r1 < r2 else 1
+    return 0
+
+
+def determine_trump(kitty: List['Card'], np_random=None) -> str:
+    """原型阶段简化定主（正式实现将替换为亮7/翻底状态机）：
+    以底牌中张数最多的花色为主；平局时按 H>S>D>C 优先。
+    含大小王时视为无花色贡献。
+
+    Args:
+        kitty (list): 12 张底牌
+
+    Returns:
+        str: 主花色 ('H'/'S'/'D'/'C')
+    """
+    cnt = Counter(c.suit for c in kitty if c.suit in SUITS)
+    if not cnt:
+        rng = np_random if np_random is not None else np.random
+        return SUITS[int(rng.randint(len(SUITS)))]
+    best = max(cnt.items(), key=lambda kv: (kv[1], -SUITS.index(kv[0])))[0]
+    return best
 
 
 # ================================================================
