@@ -94,9 +94,12 @@ class TianwangRound:
         return ''.join(sorted(repr(c) for c in played))
 
     def get_state_for(self, players, pid):
-        '''Build TianwangState (core.py) for the acting player'''
+        '''Build TianwangState (core.py) for the acting player.
+
+        行动者显式传入 actor —— 修复领出时硬编码 P0 的 Bug。
+        '''
         hands = [p.current_hand for p in players]
-        return TianwangState(hands, self.trump_suit, self.trick)
+        return TianwangState(hands, self.trump_suit, self.trick, actor=pid)
 
     def proceed_round(self, players, action_id):
         '''One play step.
@@ -118,8 +121,21 @@ class TianwangRound:
         else:                                        # 跟牌
             self.trick.plays.append((pid, combo))
 
-        if len(self.trick.plays) == NUM_PLAYERS - 1:  # 一墩打完 -> 结算
-            self._settle_trick(players)
+        # —— 关键时序修复 ——
+        # 若本手牌出完后该家已无牌可出(终局垫底张)，则跳过"结算一墩"，
+        # 直接由下一家接手；否则正常推进：墩内未满4家 -> 下一家跟牌，
+        # 满4家 -> 结算并由赢家领下一墩。早期版本 current_player 不随
+        # 跟牌推进，导致领出者 P0 的手牌被反复用于生成所有玩家的合法
+        # 动作（"手牌泄漏到跟牌方" Bug）。
+        if len(player.current_hand) == 0:
+            nxt = (pid + 1) % NUM_PLAYERS
+            while len(players[nxt].current_hand) == 0 and nxt != self.trick.leader:
+                nxt = (nxt + 1) % NUM_PLAYERS
+            self.current_player = nxt
+        elif len(self.trick.plays) < NUM_PLAYERS - 1:
+            self.current_player = self.trick.current_player()
+        else:
+            self._settle_trick(players)              # 内部把 current_player 设为赢家
 
         self._update_num_cards(players)
         if all(len(p.current_hand) == 0 for p in players):
@@ -147,7 +163,13 @@ class TianwangRound:
         self.num_tricks += 1
 
     def _settle_kitty(self, players):
-        '''扣底: 最后一墩赢家拿底分, 前提是其最后一手包含主牌'''
+        '''扣底(设计决定): 最后一墩赢家拿底分, 前提是其最后一手包含主牌。
+
+        注意: 此处底分**不翻倍**。天王规则的翻倍(如捉双扣底 x2/x4)是在
+        **最终得分**上结算的，属于 Game 层"按最后得分定档翻倍"的计分职责，
+        不在 Round 层的抓分累加里体现。本环境为极简原型，暂不实现终局
+        翻倍档位，故这里只按面值把底分计入赢家抓分。
+        '''
         w = self.last_trick_winner
         last_play = players[w]._last_play
         has_trump = any(is_trump(c, self.trump_suit) for c in last_play.cards)
@@ -155,7 +177,6 @@ class TianwangRound:
         if has_trump:
             players[w].trick_score += kitty_score
             players[w].captured.extend(self.kitty)
-        # (正式版将加入翻倍倍数规则; 原型按"含主牌才得底分"实现)
 
     def step_back(self, players):
         '''Reverse the last play (allow_step_back support)'''

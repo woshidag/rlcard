@@ -30,6 +30,24 @@ class TianwangPlayer:
         self.captured = []                      # 吃到的墩牌(Card列表, 含分数)
         self.trick_score = 0                    # 抓分合计
         self._recorded_played_cards = []        # play/play_back 记录
+        self._last_play = None                  # 最近一手(扣底判定用, Round写入)
+
+    def reset_game_state(self):
+        '''Clear all per-game dynamic state (called by Game.init_game).
+
+        RLCard 约定: game 对象会被反复 init_game() 复用，因此除手牌外
+        的所有每局状态(抓分/吃牌/出牌历史/最近一手)都必须在此重置，
+        否则上一局的 played_cards / trick_score 会泄漏到下一局。
+        '''
+        self.initial_hand = []
+        self._current_hand = []
+        self.bid = None
+        self.is_dealer = False
+        self.played_cards = []
+        self.captured = []
+        self.trick_score = 0
+        self._recorded_played_cards = []
+        self._last_play = None
 
     @property
     def current_hand(self):
